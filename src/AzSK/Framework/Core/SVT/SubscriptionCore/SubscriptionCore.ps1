@@ -13,8 +13,9 @@ class SubscriptionCore: SVTBase
 	hidden [bool] $HasGraphAPIAccess;
 	hidden [PSObject] $MisConfiguredASCPolicies;
 	hidden [SecurityCenter] $SecurityCenterInstance;
-	hidden [string[]] $SubscriptionMandatoryTags = @()
-
+	hidden [string[]] $SubscriptionMandatoryTags = @();
+	hidden [RBACTelemetry] PIMAssignments;
+	
 	SubscriptionCore([string] $subscriptionId):
         Base($subscriptionId)
     {
@@ -31,7 +32,7 @@ class SubscriptionCore: SVTBase
 		$this.ApprovedSPNs = $null
 		$this.DeprecatedAccounts = $null
 		$this.HasGraphAPIAccess = [RoleAssignmentHelper]::HasGraphAccess();
-
+		$this.GetRoleAssignments();
 		#Compute the policies ahead to get the security Contact Phone number and email id
 		$this.SecurityCenterInstance = [SecurityCenter]::new($this.SubscriptionContext.SubscriptionId);
 		$this.MisConfiguredASCPolicies = $this.SecurityCenterInstance.GetMisconfiguredPolicies();
@@ -46,6 +47,7 @@ class SubscriptionCore: SVTBase
 		$subscriptionMetada.Add("ASCSecurityContactPhoneNumber", $this.SecurityCenterInstance.ContactPhoneNumber);
 		$subscriptionMetada.Add("FeatureVersions", $azskRGTags);
 		$this.SubscriptionContext.SubscriptionMetadata = $subscriptionMetada;
+		$this.GetPIMRoles();
 		$this.PublishRBACTelemetryData();
 		$this.SubscriptionMandatoryTags += [ConfigurationManager]::GetAzSKConfigData().SubscriptionMandatoryTags;
 	}
@@ -952,7 +954,12 @@ class SubscriptionCore: SVTBase
 			
 	}
 
+	hidden [ControlResult]CheckSubscriptionPermanentRoleCount([ControlResult] $controlResult)
+	{
+			
+		return $controlResult
 
+	}	   
 	hidden [void] LoadRBACConfig()
 	{
 		if(($this.MandatoryAccounts | Measure-Object).Count -eq 0 `
@@ -1070,14 +1077,54 @@ class SubscriptionCore: SVTBase
 			$this.ASCSettings.Alerts = [AzureSecurityCenter]::GetASCAlerts($output)
 		}
 	}	
-
+   
+	hidden [void] GetPIMRoles()
+	{
+		$resourceAppIdURI =[WebRequestHelper]::ClassicManagementUri;
+		$accessToken = [Helpers]::GetAccessToken($ResourceAppIdURI)
+		$authorisationToken = "Bearer " + $accessToken
+		$headers = @{"Authorization"=$authorisationToken;"Content-Type"="application/json"}
+		$uri="https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/azureResources/resources?`$filter=type%20eq%20%27subscription%27&`$orderby=displayName"
+		$response=Invoke-WebRequest -Headers $headers -Uri $uri -Method Get
+		$resource =ConvertFrom-Json $response.Content
+		$subId=$this.SubscriptionContext.SubscriptionId;
+		$extID=$resource.Value| Where-Object{$_.externalId.split('/') -contains $subId}
+		$resourceID=$extID.id;
+		if($null -ne $response -and $null -ne $resourceID)
+		{
+			$url="https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/azureResources/resources/" + $resourceID + "`/roleAssignments?`$expand=subject,roleDefinition(`$expand=resource)"
+			$tempRoles=Invoke-WebRequest -Headers $headers -Uri $url -Method Get
+			$temproleAssignments=ConvertFrom-Json $tempRoles.Content
+			$pimAssignedRole=$temproleAssignments.value|Where-Object{$_.IsPermanent -eq $false}
+			$obj1 = "System.Collections.Generic.List[TelemetryRBAC]"
+			foreach ($roleAssignment in $pimAssignedRole)
+			{
+				$item= New-Object TelemetryRBAC 
+				$item.RoleAssignmentId =  "/subscriptions/"+$subId+"/providers/Microsoft.Authorization/roleAssignments/"+$roleAssignment.id
+				$item.Scope = $roleAssignment.roleDefinition.resource.externalId
+				$item.RoleDefinitionId=$roleAssignment.roleDefinition.templateId
+				$item.IsPIMAssignedRole="Yes";
+				$item.RoleDefinitionName = $roleAssignment.roleDefinition.displayName
+				$item.ObjectId = $roleAssignment.subject.id
+				$item.DisplayName = $roleAssignment.subject.displayName
+				$item.ObjectType=$roleAssignment.subject.type;				
+				
+			  $obj1 = $obj1 + $item
+			}
+		$permanentAssignment= $temproleAssignments.value| Where-Object{$_.IsPermanent -eq $true }
+		
+		
+		}
+	
+	}
 
 	hidden [void] PublishRBACTelemetryData()
 	{
 		$AccessRoles= $this.RoleAssignments;
+		$PIMRoles=$this.PIMAssignments
 		if($AccessRoles -ne $null)
 		{
-			$RBACAssignment = New-Object "System.Collections.Generic.List[TelemetryRBAC]"			
+			$RBACAssignment = New-Object "System.Collections.Generic.List[TelemetryRBAC]"
 			$CustomObject=New-Object CustomData;
 			$subId=$this.SubscriptionContext.SubscriptionId;
 				 foreach($item in $AccessRoles)
@@ -1095,15 +1142,38 @@ class SubscriptionCore: SVTBase
 					}
 					$RBACTelemetry.RoleDefinitionName=$item.RoleDefinitionName;
 					$RBACTelemetry.RoleDefinitionId= $item.RoleDefinitionId;
+					if($null -ne $PIMRoles){
+					$matchingObject=$PIMRoles| Where-Object{$_.SubjectId -eq $RBACTelemetry.ObjectId -and $_.RoleDefinitionId -eq $RBACTelemetry.RoleDefinitionId}
+						if($null -ne $matchingObject)
+						{
+							if($null -ne $RBACTelemetry.RoleAssignmentId){
+							$roleId=$RBACTelemetry.RoleAssignmentId.split('/')	
+							$matchingAssignment=$matchingObject|Where-Object{$_.RoleAssignmentId -in $roleId}
+							if($null -ne $matchingAssignment)
+							{
+								$RBACTelemetry.IsPIMAssignedRole="Yes"
+								$PIMRoles=$PIMRoles-$matchingAssignment;
+							}
+							}
+						}
+					}
+
 					$RBACAssignment.Add($RBACTelemetry);
+				
 				
 				}
 		
 		
+			if($null -ne $PIMRoles){
+				$RBACAssignment.Add($PIMRoles);
+			}
 			$CustomObject.Value=$RBACAssignment;
 			$CustomObject.Name="RBACTelemetry";
 			$this.PublishCustomData($CustomObject);
 		}	
 	
 	}
+
+
+
 }
