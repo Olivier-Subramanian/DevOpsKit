@@ -437,22 +437,22 @@
       "Rationale": "PIM (Privileged Identity Management) allows to manage, control, and monitor access on your subscription which helps to mitigate the risk of excessive, unnecessary or misused access rights.By using PIM, one can ensure that least required access is granted for just enough duration of time thereby eliminating risks from persistent privileged role memberships."
     },
     {
-      "ControlID": "Azure_Subscription_AuthZ_Limit_Permanent_Admin_Owner_Count",
-      "Description": "Minimize the number of permanent admins/owner on subscription level",
+      "ControlID": "Azure_Subscription_AuthZ_Dont_Assign_Permanent_Critical_Roles",
+      "Description": "Permanent access for high privilege roles should not be granted at the subscription scope",
       "Id": "SubscriptionCore281",
       "ControlSeverity": "High",
       "Automated": "Yes",
-      "MethodName": "CheckSubscriptionPermanentRoleCount",
-      "Recommendation": "",
+      "MethodName": "CheckPermanentRoleAssignments",
+      "Recommendation": "Assign critical roles at subscription level through PIM (Privileged Identity Management). Refer https://docs.microsoft.com/en-us/azure/active-directory/privileged-identity-management/azure-pim-resource-rbac#assign-roles  ",
       "Tags": [
         "SDL",
         "Automated",
         "Access",
-        "AuthZ",
-        "GraphRead"
-      ],
+        "AuthZ"
+            ],
       "Enabled": true,
-      "Rationale": "Permanent access to privileged roles should be minimized so as to ensure critical resources present on subscription are accessed only by the legitimate users when required."
+      "Rationale": "Permanent access to critical roles should be minimized so as to ensure critical resources present on subscription are accessed only by the legitimate users when required. PIM does this by limiting users to only taking on their privileges just in time (JIT), or by assigning privileges for a shortened duration after which privileges are revoked automatically."
     }
+
   ]
 }

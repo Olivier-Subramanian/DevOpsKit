@@ -14,8 +14,9 @@ class SubscriptionCore: SVTBase
 	hidden [PSObject] $MisConfiguredASCPolicies;
 	hidden [SecurityCenter] $SecurityCenterInstance;
 	hidden [string[]] $SubscriptionMandatoryTags = @();
-	hidden [RBACTelemetry] PIMAssignments;
-	
+	hidden [System.Collections.Generic.List[TelemetryRBAC]] $PIMAssignments=@();
+	hidden [System.Collections.Generic.List[TelemetryRBAC]] $permanentAssignments=@();
+
 	SubscriptionCore([string] $subscriptionId):
         Base($subscriptionId)
     {
@@ -930,12 +931,9 @@ class SubscriptionCore: SVTBase
 
 	hidden [ControlResult]CheckIfPIMisEnabled([ControlResult] $controlResult)
 	{
-		if($this.HasGraphAPIAccess)
+		if($null -ne $this.PIMAssignments)
 		{
-		
-			$AccessRoles=$this.RoleAssignments| Where-Object {($_.Scope -eq $this.SubscriptionContext.Scope)};
-			$pimConfig=$AccessRoles| Where-Object{ ($_.RoleDefinitionName -eq 'User Access Administrator' -and $_.DisplayName -like 'MS-PIM' -and $_.ObjectType -eq 'ServicePrincipal') };
-			if($pimConfig)
+			if(($this.PIMAssignments|Measure-Object).Count -gt 0)
 			{
 				$controlResult.AddMessage([VerificationResult]::Passed, "PIM (Privileged Identity Management) is enabled on your subscription.")
 			}
@@ -944,19 +942,36 @@ class SubscriptionCore: SVTBase
 				$controlResult.AddMessage([VerificationResult]::Failed, "PIM (Privileged Identity Management) is not enabled on your subscription.")
 			}
 		}
-		else
-		{
-			$controlResult.CurrentSessionContext.Permissions.HasRequiredAccess = $false;
-			$controlResult.AddMessage([VerificationResult]::Manual, "Not able to query Graph API. This has to be manually verified.");
+		else {
+			$controlResult.AddMessage([VerificationResult]::Manual, "Unable to fetch PIM details for the subscription, Please verify manually")
 		}
-
+		
 		return $controlResult
 			
 	}
 
-	hidden [ControlResult]CheckSubscriptionPermanentRoleCount([ControlResult] $controlResult)
+	hidden [ControlResult] CheckPermanentRoleAssignments([ControlResult] $controlResult)
 	{
-			
+		$criticalRoles=$this.ControlSettings.CriticalPIMRoles;
+		$permanentRoles=$this.permanentAssignments;
+		if(($permanentRoles| measure-object).Count -gt 0 )
+		{
+			$criticalPermanentRoles=$permanentRoles|Where-Object{$_.RoleDefinitionName -in $criticalRoles}
+			if($criticalPermanentRoles.Count-gt 0)
+			{
+				$controlResult.AddMessage([VerificationResult]::Failed, "Subscription contains permanent role assignment for critical roles : $criticalRoles")
+				$temp=$criticalPermanentRoles|Sort-Object -Property RoleDefinitionName
+				$controlResult.AddMessage($temp);
+				
+			}
+			else {
+				$controlResult.AddMessage([VerificationResult]::Passed)
+			}
+		}
+		else {
+			$controlResult.AddMessage("Unable to fetch PIM data, please verify manually.")
+		}
+
 		return $controlResult
 
 	}	   
@@ -1082,40 +1097,59 @@ class SubscriptionCore: SVTBase
 	{
 		$resourceAppIdURI =[WebRequestHelper]::ClassicManagementUri;
 		$accessToken = [Helpers]::GetAccessToken($ResourceAppIdURI)
-		$authorisationToken = "Bearer " + $accessToken
-		$headers = @{"Authorization"=$authorisationToken;"Content-Type"="application/json"}
-		$uri="https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/azureResources/resources?`$filter=type%20eq%20%27subscription%27&`$orderby=displayName"
-		$response=Invoke-WebRequest -Headers $headers -Uri $uri -Method Get
-		$resource =ConvertFrom-Json $response.Content
-		$subId=$this.SubscriptionContext.SubscriptionId;
-		$extID=$resource.Value| Where-Object{$_.externalId.split('/') -contains $subId}
-		$resourceID=$extID.id;
-		if($null -ne $response -and $null -ne $resourceID)
+		if($null -ne $AccessToken)
 		{
-			$url="https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/azureResources/resources/" + $resourceID + "`/roleAssignments?`$expand=subject,roleDefinition(`$expand=resource)"
-			$tempRoles=Invoke-WebRequest -Headers $headers -Uri $url -Method Get
-			$temproleAssignments=ConvertFrom-Json $tempRoles.Content
-			$pimAssignedRole=$temproleAssignments.value|Where-Object{$_.IsPermanent -eq $false}
-			$obj1 = "System.Collections.Generic.List[TelemetryRBAC]"
-			foreach ($roleAssignment in $pimAssignedRole)
+			$authorisationToken = "Bearer " + $accessToken
+			$headers = @{"Authorization"=$authorisationToken;"Content-Type"="application/json"}
+			$uri="https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/azureResources/resources?`$filter=type%20eq%20%27subscription%27&`$orderby=displayName"
+			try
 			{
-				$item= New-Object TelemetryRBAC 
-				$item.RoleAssignmentId =  "/subscriptions/"+$subId+"/providers/Microsoft.Authorization/roleAssignments/"+$roleAssignment.id
-				$item.Scope = $roleAssignment.roleDefinition.resource.externalId
-				$item.RoleDefinitionId=$roleAssignment.roleDefinition.templateId
-				$item.IsPIMAssignedRole="Yes";
-				$item.RoleDefinitionName = $roleAssignment.roleDefinition.displayName
-				$item.ObjectId = $roleAssignment.subject.id
-				$item.DisplayName = $roleAssignment.subject.displayName
-				$item.ObjectType=$roleAssignment.subject.type;				
-				
-			  $obj1 = $obj1 + $item
+				$response=Invoke-WebRequest -Headers $headers -Uri $uri -Method Get
+				$resource =ConvertFrom-Json $response.Content
+				$subId=$this.SubscriptionContext.SubscriptionId;
+				$extID=$resource.Value| Where-Object{$_.externalId.split('/') -contains $subId}
+				$resourceID=$extID.id;
+				if($null -ne $response -and $null -ne $resourceID)
+				{
+					$url="https://api.azrbac.mspim.azure.com/api/v2/privilegedAccess/azureResources/resources/" + $resourceID + "`/roleAssignments?`$expand=subject,roleDefinition(`$expand=resource)"
+					$tempRoles=Invoke-WebRequest -Headers $headers -Uri $url -Method Get
+					$temproleAssignments=ConvertFrom-Json $tempRoles.Content
+					$pimAssignedRole=$temproleAssignments.value
+					foreach ($roleAssignment in $pimAssignedRole)
+					{
+						$item= New-Object TelemetryRBAC 
+						$item.SubscriptionId= $subId;
+						$item.RoleAssignmentId = $roleAssignment.externalId
+						$item.RoleDefinitionId=$roleAssignment.roleDefinition.templateId
+						$item.Scope=$roleAssignment.roleDefinition.resource.externalId;
+						$item.RoleDefinitionName = $roleAssignment.roleDefinition.displayName
+						$item.ObjectId = $roleAssignment.subject.id
+						$item.DisplayName = $roleAssignment.subject.displayName
+						$item.ObjectType=$roleAssignment.subject.type;	
+						if($roleAssignment.IsPermanent -eq $false)
+						{
+							$item.IsPIMEnabled=$true;
+							if($roleAssignment.assignmentState -eq "Eligible")
+							{
+								$this.PIMAssignments.Add($item);
+							}
+						}
+						else
+						{
+							$item.IsPIMEnabled=$false;
+							$this.permanentAssignments.Add($item);
+						}
+					}
+			
+				}
 			}
-		$permanentAssignment= $temproleAssignments.value| Where-Object{$_.IsPermanent -eq $true }
-		
-		
+			catch
+			{
+				$this.PIMAssignments=$null;
+				$this.permanentAssignments=$null;
+				$this.PublishException($_)
+			}
 		}
-	
 	}
 
 	hidden [void] PublishRBACTelemetryData()
@@ -1128,7 +1162,7 @@ class SubscriptionCore: SVTBase
 			$CustomObject=New-Object CustomData;
 			$subId=$this.SubscriptionContext.SubscriptionId;
 				 foreach($item in $AccessRoles)
-				{  	
+				{  	$matchingAssignment=New-Object TelemetryRBAC;
 					$RBACTelemetry= New-Object TelemetryRBAC;
 					$RBACTelemetry.SubscriptionId= $subId;
 					$RBACTelemetry.DisplayName=$item.DisplayName;
@@ -1142,22 +1176,15 @@ class SubscriptionCore: SVTBase
 					}
 					$RBACTelemetry.RoleDefinitionName=$item.RoleDefinitionName;
 					$RBACTelemetry.RoleDefinitionId= $item.RoleDefinitionId;
-					if($null -ne $PIMRoles){
-					$matchingObject=$PIMRoles| Where-Object{$_.SubjectId -eq $RBACTelemetry.ObjectId -and $_.RoleDefinitionId -eq $RBACTelemetry.RoleDefinitionId}
+					if($null -ne $PIMRoles)
+					{
+						$matchingObject=$PIMRoles| Where-Object{$_.ObjectId -eq $RBACTelemetry.ObjectId -and $_.RoleDefinitionId -eq $RBACTelemetry.RoleDefinitionId -and $_.Scope -eq $RBACTelemetry.Scope}
 						if($null -ne $matchingObject)
 						{
-							if($null -ne $RBACTelemetry.RoleAssignmentId){
-							$roleId=$RBACTelemetry.RoleAssignmentId.split('/')	
-							$matchingAssignment=$matchingObject|Where-Object{$_.RoleAssignmentId -in $roleId}
-							if($null -ne $matchingAssignment)
-							{
-								$RBACTelemetry.IsPIMAssignedRole="Yes"
-								$PIMRoles=$PIMRoles-$matchingAssignment;
-							}
-							}
+							$RBACTelemetry.IsPIMEnabled=$true;	
+							
 						}
 					}
-
 					$RBACAssignment.Add($RBACTelemetry);
 				
 				
@@ -1165,7 +1192,7 @@ class SubscriptionCore: SVTBase
 		
 		
 			if($null -ne $PIMRoles){
-				$RBACAssignment.Add($PIMRoles);
+				$RBACAssignment.AddRange($PIMRoles);
 			}
 			$CustomObject.Value=$RBACAssignment;
 			$CustomObject.Name="RBACTelemetry";
